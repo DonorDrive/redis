@@ -99,7 +99,7 @@ component accessors = "true" implements = "lib.util.IContainer" {
 		try {
 			local.connection = variables.connectionPool.getConnection();
 
-			local.scanParams = new java("redis.clients.jedis.ScanParams")
+			local.scanParams = createObject("java", "redis.clients.jedis.ScanParams")
 				// setting count > 1 forces scan to do more scanning
 				.count(100)
 				.match(getName() & "\:*");
@@ -234,7 +234,7 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			return arguments.value;
 		}
 
-		throw(type = "dd.core.InvalidDataTypeException", message = "The value is not a supported data type.");
+		throw(type = "lib.redis.InvalidDataTypeException", message = "The value is not a supported data type.");
 	}
 
 	struct function values() {
