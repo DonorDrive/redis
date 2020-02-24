@@ -2,17 +2,23 @@ component accessors = "true" {
 
 	// github.com/xetorthio/jedis/wiki/Getting-started
 
+	property name = "clientName" type = "string";
 	property name = "host" type = "string" setter = "false";
 	property name = "master" type = "string";
 	property name = "password" type = "string";
 	property name = "poolConfiguration" type = "struct";
 	property name = "port" type = "numeric";
+	property name = "sentinelPassword" type = "string";
 	property name = "sentinels" type = "array";
 	property name = "timeoutMillis" type = "numeric";
 
 	ConnectionPool function init() {
-		variables.port = 6379;
-		variables.timeoutMillis = 1000;
+		variables.protocol = createObject("java", "redis.clients.jedis.Protocol");
+
+		variables.clientName = createObject("java", "java.net.InetAddress").getLocalHost().getHostName();
+		variables.host = variables.protocol.DEFAULT_HOST;
+		variables.port = variables.protocol.DEFAULT_PORT;
+		variables.timeoutMillis = variables.protocol.DEFAULT_TIMEOUT;
 
 		structEach(
 			arguments,
@@ -47,7 +53,7 @@ component accessors = "true" {
 	}
 
 	any function getJedisPoolConfig() {
-		local.poolConfig = new java("redis.clients.jedis.JedisPoolConfig").init();
+		local.poolConfig = createObject("java", "redis.clients.jedis.JedisPoolConfig").init();
 
 		if(structKeyExists(variables, "poolConfiguration")) {
 			structEach(
@@ -67,45 +73,32 @@ component accessors = "true" {
 		}
 
 		if(structKeyExists(variables, "sentinels")) {
-			local.sentinels = new java("java.util.HashSet").init(variables.sentinels);
-
-			if(structKeyExists(variables, "password")) {
-				variables.pool = new java("redis.clients.jedis.JedisSentinelPool")
-					.init(
-						javaCast("string", variables.master),
-						local.sentinels,
-						getJedisPoolConfig(),
-						javaCast("int", variables.timeoutMillis),
-						javaCast("string", variables.password)
-					);
-			} else {
-				variables.pool = new java("redis.clients.jedis.JedisSentinelPool")
-					.init(
-						javaCast("string", variables.master),
-						local.sentinels,
-						getJedisPoolConfig(),
-						javaCast("int", variables.timeoutMillis)
-					);
-			}
+			variables.pool = createObject("java", "redis.clients.jedis.JedisSentinelPool")
+				.init(
+					javaCast("string", variables.master),
+					createObject("java", "java.util.HashSet").init(variables.sentinels),
+					getJedisPoolConfig(),
+					javaCast("int", variables.timeoutMillis),
+					javaCast("int", 0), // soTimeout
+					structKeyExists(variables, "password") ? javaCast("string", variables.password) : javaCast("null", ""),
+					variables.protocol.DEFAULT_DATABASE,
+					javaCast("string", variables.clientName),
+					javaCast("int", variables.timeoutMillis), // sentinelConnectionTimeout
+					javaCast("int", 0), // sentinelSoTimeout
+					structKeyExists(variables, "sentinelPassword") ? javaCast("string", variables.sentinelPassword) : javaCast("null", ""),
+					javaCast("string", "sentinel:" & variables.clientName)
+				);
 		} else {
-			if(structKeyExists(variables, "password")) {
-				variables.pool = new java("redis.clients.jedis.JedisPool")
-					.init(
-						getJedisPoolConfig(),
-						javaCast("string", variables.host),
-						javaCast("int", variables.port),
-						javaCast("int", variables.timeoutMillis),
-						javaCast("string", variables.password)
-					);
-			} else {
-				variables.pool = new java("redis.clients.jedis.JedisPool")
-					.init(
-						getJedisPoolConfig(),
-						javaCast("string", variables.host),
-						javaCast("int", variables.port),
-						javaCast("int", variables.timeoutMillis)
-					);
-			}
+			variables.pool = createObject("java", "redis.clients.jedis.JedisPool")
+				.init(
+					getJedisPoolConfig(),
+					javaCast("string", variables.host),
+					javaCast("int", variables.port),
+					javaCast("int", variables.timeoutMillis),
+					structKeyExists(variables, "password") ? javaCast("string", variables.password) : javaCast("null", ""),
+					variables.protocol.DEFAULT_DATABASE,
+					javaCast("string", variables.clientName)
+				);
 		}
 
 		return this;

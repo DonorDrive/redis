@@ -21,7 +21,7 @@ component extends = "mxunit.framework.TestCase" {
 				variables.query,
 				[
 					{
-						"id": 1,
+						"id": 5001,
 						"bar": true,
 						"foo": "9E835384-07E9-724C-1911F370FCFA67A6",
 						"createdTimestamp": parseDateTime("2019-12-12T00:00:00.123Z"),
@@ -30,7 +30,7 @@ component extends = "mxunit.framework.TestCase" {
 						"letter": "A"
 					},
 					{
-						"id": 2,
+						"id": 5002,
 						"bar": true,
 						"foo": "ECDC79F4-A719-D461-81BEC1A394697213",
 						"createdTimestamp": parseDateTime("2019-12-25T00:00:00.001Z"),
@@ -39,7 +39,7 @@ component extends = "mxunit.framework.TestCase" {
 						"letter": "B"
 					},
 					{
-						"id": 3,
+						"id": 5003,
 						"bar": true,
 						"foo": "EFA8C662-B0A9-FD1D-99FB38E815EDA2C5",
 						"createdTimestamp": parseDateTime("2019-12-31T00:00:00.000Z"),
@@ -55,9 +55,9 @@ component extends = "mxunit.framework.TestCase" {
 				queryAddRow(
 					variables.query,
 					{
-						"id": local.i,
+						"id": 5000 + local.i,
 						"bar": (!randRange(1, 3) % 2 ? local.i % 2 : javaCast("null", "")),
-						"foo": createUUID(),
+						"foo": (local.i == 500 ? "Šťŕĭńġ" : local.i == 501 ? "the rain in spain" : createUUID()),
 						"createdTimestamp": (!randRange(1, 3) % 2 ? dateAdd("s", -(local.i), variables.now) : javaCast("null", "")),
 						"createdDate": (!randRange(1, 3) % 2 ? variables.now : javaCast("null", "")),
 						"createdTime": (!randRange(1, 3) % 2 ? variables.now : javaCast("null", "")),
@@ -124,7 +124,7 @@ component extends = "mxunit.framework.TestCase" {
 	}
 
 	function test_getRowKey() {
-		assertEquals("mxunit:indexed:id:1", variables.cache.getRowKey(id = 1));
+		assertEquals("mxunit:indexed:id:5001", variables.cache.getRowKey(id = 5001));
 	}
 
 	function test_putRow_getRow() {
@@ -139,7 +139,7 @@ component extends = "mxunit.framework.TestCase" {
 
 	function test_removeRow() {
 		local.queryRow = queryGetRow(variables.query, 1);
-		local.queryRow.id = createUUID();
+		local.queryRow.foo = createUUID();
 		variables.cache.putRow(local.queryRow);
 
 		assertTrue(variables.cache.containsRow(id = local.queryRow.id));
@@ -203,7 +203,7 @@ component extends = "mxunit.framework.TestCase" {
 
 		debug(local.result);
 		assertEquals(10, local.result.recordCount);
-		assertEquals("1000,999,998,997,996,995,994,993,992,991", valueList(local.result.id));
+		assertEquals("6000,5999,5998,5997,5996,5995,5994,5993,5992,5991", valueList(local.result.id));
 	}
 
 	function test_select_orderBy_limit_offset() {
@@ -212,22 +212,23 @@ component extends = "mxunit.framework.TestCase" {
 		debug(local.result);
 		assertEquals(10, local.result.recordCount);
 		assertEquals(1000, local.result.getMetadata().getExtendedMetadata().totalRecordCount);
-		assertEquals("11,12,13,14,15,16,17,18,19,20", valueList(local.result.id));
+		assertEquals("5011,5012,5013,5014,5015,5016,5017,5018,5019,5020", valueList(local.result.id));
 	}
 
 	function test_select_where() {
-		local.result = variables.cache.select().where("id = #variables.query.id#").execute();
+		local.compare = queryGetRow(variables.query, variables.query.recordCount);
+		local.result = variables.cache.select().where("id = #local.compare.id#").execute();
 
 		debug(local.result);
-		assertEquals(variables.query.id, local.result.id);
-		assertEquals(variables.query.createdTimestamp, local.result.createdTimestamp);
-		assertEquals(variables.query.createdDate, local.result.createdDate);
-		assertEquals(variables.query.createdTime, local.result.createdTime);
+		assertEquals(local.compare.id, local.result.id);
+		assertEquals(local.compare.createdTimestamp, local.result.createdTimestamp);
+		assertEquals(local.compare.createdDate, local.result.createdDate);
+		assertEquals(local.compare.createdTime, local.result.createdTime);
 		assertEquals(1, local.result.recordCount);
 	}
 
 	function test_select_where_compound_limit() {
-		local.result = variables.cache.select().where("id < 100 AND createdTimestamp >= '#dateTimeFormat(dateAdd("d", -1, variables.now), "yyyy-mm-dd HH:nn:ss.l")#'").execute(limit = 10);
+		local.result = variables.cache.select().where("id < 5100 AND createdTimestamp >= '#dateTimeFormat(dateAdd("d", -1, variables.now), "yyyy-mm-dd HH:nn:ss.l")#'").execute(limit = 10);
 
 //		debug(local.result);
 		assertEquals(10, local.result.recordCount);
@@ -240,9 +241,10 @@ component extends = "mxunit.framework.TestCase" {
 	}
 
 	function test_select_where_DD_13660() {
-		local.result = variables.cache.select("letter, id").where("id > 990.00").execute();
+		local.result = variables.cache.select("letter, id").where("id > 5990.00").execute();
 
 		debug(local.result);
+		assertEquals(10, local.result.recordCount)
 	}
 
 	function test_select_where_DD_13763() {
@@ -253,6 +255,23 @@ component extends = "mxunit.framework.TestCase" {
 
 		debug(local.where);
 		debug(local.result);
+	}
+
+	function test_select_where_DD_16368() {
+		local.where = "foo LIKE '%rain in spain%'";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(5501, local.result.id);
+
+		local.where = "foo LIKE '%the rain in spain%'";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(5501, local.result.id);
+
+		local.where = "foo LIKE '%a in the%'";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(0, local.result.recordCount);
 	}
 
 	function test_select_where_DDMAINT_20768() {
@@ -267,19 +286,30 @@ component extends = "mxunit.framework.TestCase" {
 		assertEquals(local.assert, local.result);
 	}
 
+	function test_select_where_DDMAINT_21917() {
+		local.where = "foo = 'Šťŕĭńġ'";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(1, local.result.recordCount);
+		assertEquals(5500, local.result.id);
+
+		debug(local.where);
+		debug(local.result);
+	}
+
 	function test_select_where_in() {
-		local.result = variables.cache.select("id, foo").where("foo IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#') OR id IN (5, 10, 15)").execute();
+		local.result = variables.cache.select("id, foo").where("foo IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#') OR id IN (5005, 5010, 5015)").execute();
 
 //		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("1,2,3,5,10,15", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5001,5002,5003,5005,5010,5015", listSort(valueList(local.result.id), "numeric"));
 		assertEquals(6, local.result.recordCount);
 
 		local.result = variables.cache.select("id, foo").where("foo IN ('#variables.query.foo[1]#','#variables.query.foo[2]#')").execute();
 
 //		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("1,2", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5001,5002", listSort(valueList(local.result.id), "numeric"));
 
 		// test a single record
 		local.result = variables.cache.select("id, foo").where("foo IN ('#variables.query.foo[1]#'").execute();
@@ -290,18 +320,18 @@ component extends = "mxunit.framework.TestCase" {
 
 	function test_select_where_not_in() {
 		// numeric filtering
-		local.result = variables.cache.select("id, foo").where("id NOT IN (5, 10, 15) AND id < 15").execute();
+		local.result = variables.cache.select("id, foo").where("id NOT IN (5005, 5010, 5015) AND id < 5015").execute();
 
 //		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("1,2,3,4,6,7,8,9,11,12,13,14", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5001,5002,5003,5004,5006,5007,5008,5009,5011,5012,5013,5014", listSort(valueList(local.result.id), "numeric"));
 
 		// string filtering
-		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#') AND id < 15").execute();
+		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#') AND id < 5015").execute();
 
 		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("4,5,6,7,8,9,10,11,12,13,14", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5004,5005,5006,5007,5008,5009,5010,5011,5012,5013,5014", listSort(valueList(local.result.id), "numeric"));
 
 		// test negation of a single record
 		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#'").execute();
@@ -312,10 +342,10 @@ component extends = "mxunit.framework.TestCase" {
 	}
 
 	function test_select_where_orderBy_limit() {
-		local.result = variables.cache.select().where("id <= 500").orderBy("id DESC").execute(limit = 10);
+		local.result = variables.cache.select().where("id <= 5500").orderBy("id DESC").execute(limit = 10);
 
 //		debug(local.result);
-		assertEquals("500,499,498,497,496,495,494,493,492,491", valueList(local.result.id));
+		assertEquals("5500,5499,5498,5497,5496,5495,5494,5493,5492,5491", valueList(local.result.id));
 		assertEquals(10, local.result.recordCount);
 	}
 
