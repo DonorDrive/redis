@@ -1,9 +1,10 @@
 component accessors = "true" extends = "lib.sql.QueryableCache" {
 
 	property name = "importBatchSize" type = "numeric" default = "1000";
-	property name = "name" type = "string" setter = "false";
+	property name = "language" type = "string" default = "english";
 	property name = "maxResults" type = "numeric" default = "1000";
 	property name = "minPrefixLength" type = "numeric" default = "2";
+	property name = "name" type = "string" setter = "false";
 
 	// https://oss.redislabs.com/redisearch/Stopwords.html
 	variables.DEFAULT_STOP_WORDS = "a is the an and are as at be but by for if in into it no not of on or such that their then there these they this to was will with";
@@ -76,14 +77,16 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 			local.parameters = arguments.selectStatement.getParameters();
 
 			for(local.i = 1; local.i <= arrayLen(local.criteria); local.i++) {
-				local.clause = "@#local.criteria[local.i].field#:";
 				// reset this on every iteration
+				structDelete(local, "clause");
 				structDelete(local, "value");
 
 				if(isRedisNumeric(local.criteria[local.i].field)) {
+					local.clause = "@#local.criteria[local.i].field#:";
+
 					if(getQueryable().getFieldSQLType(local.criteria[local.i].field) == "bit") {
 						local.value = local.parameters[local.i].value ? 1 : 0;
-					} else if(isRedisNumericDate(local.criteria[local.i].field)) {
+					} else if(isRedisDate(local.criteria[local.i].field)) {
 						local.value = parseDateTime(local.parameters[local.i].value).getTime();
 					}
 
@@ -124,19 +127,17 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 								local.clause = "(-" & local.clause & ")";
 							}
 							break;
-						default:
+						case "=":
 							local.clause &= "[#local.value# #local.value#]";
+							break;
+						default:
+							throw(type = "lib.redis.UnsupportedOperatorException", message = "#local.criteria[local.i].operator# is not supported for this field (#local.criteria[local.i].field#)");
 							break;
 					}
 				} else {
 					local.clause = "@_NFD_#local.criteria[local.i].field#:";
 
-					local.value = stripAccents(local.parameters[local.i].value)
-						// remove wildcard operators - will re-add where appropriate
-						.replace("%", " ", "all")
-						// escape dashes
-						.replace("-", "\-", "all")
-						.trim();
+					local.value = normalize(local.parameters[local.i].value);
 
 					switch(local.criteria[local.i].operator) {
 						case "LIKE":
@@ -166,14 +167,30 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 							break;
 						case "IN":
 						case "NOT IN":
-							local.clause &= "(" & replace('"' & local.value & '"', chr(31), '"|"', "all") & ")";
+							local.clause = listReduce(
+								local.value,
+								function(result, item) {
+									if(find(" ", arguments.item)) {
+										arguments.item = '"' & arguments.item & '"';
+									}
+
+									return listAppend(arguments.result, arguments.item, "|");
+								},
+								"",
+								chr(31)
+							);
+
+							local.clause = "(" & local.clause & ")";
 
 							if(local.criteria[local.i].operator == "NOT IN") {
 								local.clause = "(-" & local.clause & ")";
 							}
 							break;
-						default:
+						case "=":
 							local.clause &= '"' & local.value & '"';
+							break;
+						default:
+							throw(type = "lib.redis.UnsupportedOperatorException", message = "#local.criteria[local.i].operator# is not supported for this field (#local.criteria[local.i].field#)");
 							break;
 					}
 				}
@@ -195,7 +212,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 				// why aggregation? redisearch only supports multiple sorts via the `aggregate` command
 				local.ab = createObject("java", "io.redisearch.aggregation.AggregationBuilder")
 					.init("'" & local.queryString & "'")
-					.apply("@#getIdentifierField()#", "id");
+					.apply((isRedisNumeric(getIdentifierField()) ? "@" : "@_NFD_") & getIdentifierField(), "id");
 
 				// sort
 				local.sortedField = createObject("java", "io.redisearch.aggregation.SortedField");
@@ -204,10 +221,12 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 					local.sortFields = arrayReduce(
 						arguments.selectStatement.getOrderCriteria(),
 						function(result, item) {
-							if(isRedisNumeric(listFirst(arguments.item, " "))) {
-								local.f = "@" & listFirst(arguments.item, " ");
+							local.f = listFirst(arguments.item, " ");
+
+							if(isRedisNumeric(local.f)) {
+								local.f = "@" & local.f;
 							} else {
-								local.f = "@_NFD_" & listFirst(arguments.item, " ");
+								local.f = "@_NFD_" & local.f;
 							}
 
 							local.o = listLast(arguments.item, " ");
@@ -223,7 +242,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 						[]
 					);
 				} else {
-					local.sortFields = [ local.sortedField.asc("@" & getIdentifierField()) ];
+					local.sortFields = [ local.sortedField.asc("@id") ];
 				}
 
 				local.maxResults = getMaxResults();
@@ -248,8 +267,6 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 					}
 				}
 
-				local.searchClient = getClient();
-
 				// convert the command to a string for debugging purposes
 				if(structKeyExists(arguments, "debug") && arguments.debug == "query") {
 					local.byteArray = [ createObject("java", "java.lang.String").init(javaCast("string", "")).getBytes() ];
@@ -265,7 +282,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 					throw(type = "lib.redis.DebugException", message = "ft.aggregate " & getName() & " " & local.string);
 				}
 
-				local.ids = local.searchClient.aggregate(local.ab);
+				local.ids = getClient().aggregate(local.ab);
 				local.resultsLength = local.ids.totalResults;
 
 				for(local.i = 0; local.i < local.ids.getResults().size(); local.i++) {
@@ -310,7 +327,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		local.query = queryNew(arguments.selectStatement.getSelect(), local.fieldSQLTypes);
 
 		if(arrayLen(local.docIDs) > 0) {
-			local.documents = local.searchClient.getDocuments(local.docIDs);
+			local.documents = getClient().getDocuments(local.docIDs);
 
 			for(local.i = 0; local.i < local.documents.size(); local.i++) {
 				local.document = local.documents.get(local.i);
@@ -318,7 +335,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 				if(!isNull(local.document)) {
 					queryAddRow(
 						local.query,
-						fromRedisearchDocument(local.document, arguments.selectStatement.getSelect())
+						fromRediSearchDocument(local.document, arguments.selectStatement.getSelect())
 					);
 				}
 			}
@@ -336,7 +353,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		return local.query;
 	}
 
-	struct function fromRedisearchDocument(required any document, string fieldFilter = "") {
+	struct function fromRediSearchDocument(required any document, string fieldFilter = "") {
 		if(arguments.fieldFilter == "") {
 			arguments.fieldFilter = getFieldList();
 		}
@@ -345,26 +362,20 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		return listReduce(
 			arguments.fieldFilter,
 			function(result, item) {
-				if(isRedisNumeric(arguments.item)) {
-					if(isRedisNumericDate(arguments.item)) {
-						if(document.hasProperty(arguments.item)) {
-							arguments.result[arguments.item] = createObject("java", "java.util.Date").init(javaCast("long", document.getString(arguments.item)));
-						} else {
-							arguments.result[arguments.item] = javaCast("null", "");
-						}
-					} else {
-						if(document.hasProperty(arguments.item)) {
-							arguments.result[arguments.item] = val(document.getString(arguments.item));
-						} else {
-							arguments.result[arguments.item] = javaCast("null", "");
-						}
+				if(document.hasProperty(arguments.item)) {
+					local.value = document.getString(arguments.item);
+
+					if(isRedisDate(arguments.item) && isNumeric(val(local.value))) {
+						arguments.result[arguments.item] = createObject("java", "java.util.Date").init(javaCast("long", val(local.value)));
+					} else if(isRedisNumeric(arguments.item) && isNumeric(val(local.value))) {
+						arguments.result[arguments.item] = val(local.value);
+					} else if(len(local.value) > 0) {
+						arguments.result[arguments.item] = local.value;
 					}
-				} else {
-					if(document.hasProperty(arguments.item)) {
-						arguments.result[arguments.item] = document.getString(arguments.item);
-					} else {
-						arguments.result[arguments.item] = javaCast("null", "");
-					}
+				}
+
+				if(!structKeyExists(arguments.result, arguments.item)) {
+					arguments.result[arguments.item] = javaCast("null", "");
 				}
 
 				return arguments.result;
@@ -383,7 +394,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		local.document = getClient().getDocument(getRowKey(argumentCollection = arguments));
 
 		if(!isNull(local.document)) {
-			local.result = fromRedisearchDocument(local.document);
+			local.result = fromRediSearchDocument(local.document);
 
 			for(local.key in getFieldList()) {
 				if(!structKeyExists(local.result, local.key)) {
@@ -395,7 +406,19 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		}
 	}
 
-	private boolean function isRedisNumeric(required string field) {
+	boolean function isRedisDate(required string field) {
+		switch(getQueryable().getFieldSQLType(arguments.field)) {
+			case "date":
+			case "time":
+			case "timestamp":
+				return true;
+				break;
+		};
+
+		return false;
+	}
+
+	boolean function isRedisNumeric(required string field) {
 		switch(getQueryable().getFieldSQLType(arguments.field)) {
 			case "bigint":
 			case "bit":
@@ -418,38 +441,28 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		return false;
 	}
 
-	private boolean function isRedisNumericDate(required string field) {
-		switch(getQueryable().getFieldSQLType(arguments.field)) {
-			case "date":
-			case "time":
-			case "timestamp":
-				return true;
-				break;
-		};
+	private string function normalize(required string input) {
+		arguments.input = lCase(arguments.input);
 
-		return false;
-	}
+		// https://oss.redislabs.com/redisearch/Escaping.html
+		arguments.input = listReduce(
+			arguments.input,
+			function(result, item) {
+				return listAppend(arguments.result, arguments.item.REReplace("\W+", " ", "all").trim(), chr(31));
+			},
+			"",
+			chr(31)
+		);
 
-	private boolean function isRedisNumericInt(required string field) {
-		switch(getQueryable().getFieldSQLType(arguments.field)) {
-			case "bigint":
-			case "bit":
-			case "integer":
-			case "smallint":
-			case "tinyint":
-				return true;
-				break;
-		};
-
-		return false;
+		return variables.normalizer.normalize(javaCast("string", arguments.input), variables.normalizerForm).replaceAll("\p{InCombiningDiacriticalMarks}+", "");
 	}
 
 	void function putRow(required struct row) {
 		getClient().addDocument(
-			toRedisearchDocument(arguments.row),
+			toRediSearchDocument(arguments.row),
 			createObject("java", "io.redisearch.client.AddOptions")
-				.setLanguage("english")
-				.setReplacementPolicy(createObject("java", "io.redisearch.client.AddOptions$ReplacementPolicy").FULL)
+				.setLanguage(getLanguage())
+				.setReplacementPolicy(createObject("java", "io.redisearch.client.AddOptions$ReplacementPolicy").PARTIAL)
 		);
 	}
 
@@ -461,11 +474,11 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		local.documents = [];
 		local.replacementPolicy = createObject("java", "io.redisearch.client.AddOptions$ReplacementPolicy");
 		local.addOptions = createObject("java", "io.redisearch.client.AddOptions")
-			.setLanguage("english")
+			.setLanguage(getLanguage())
 			.setReplacementPolicy(arguments.overwrite ? local.replacementPolicy.FULL : local.replacementPolicy.NONE);
 
 		for(local.row in getQueryable().select().execute()) {
-			arrayAppend(local.documents, toRedisearchDocument(local.row));
+			arrayAppend(local.documents, toRediSearchDocument(local.row));
 
 			if(arrayLen(local.documents) == getImportBatchSize()) {
 				getClient().addDocuments(local.addOptions, local.documents);
@@ -509,48 +522,40 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		return this;
 	}
 
-	string function stripAccents(required string input) {
-		return variables.normalizer.normalize(javaCast("string", arguments.input), variables.normalizerForm).replaceAll("\p{InCombiningDiacriticalMarks}+", "");
-	}
-
-	any function toRedisearchDocument(required struct row) {
+	any function toRediSearchDocument(required struct row) {
 		if(!structKeyExists(arguments.row, getIdentifierField())) {
 			throw(type = "lib.redis.MissingIdentifierException", message = "the identifier field #getIdentifierField()# must be provided");
 		}
 
-		local.fields = createObject("java", "java.util.HashMap").init();
+		local.document = createObject("java", "io.redisearch.Document").init(getRowKey(argumentCollection = arguments.row));
 
 		for(local.field in getQueryable().getFieldList()) {
-			if(isRedisNumeric(local.field)) {
-				if(isRedisNumericDate(local.field)
-						&& structKeyExists(arguments.row, local.field)
-						&& isDate(arguments.row[local.field])
-					) {
-					local.fields.put(local.field, javaCast("long", arguments.row[local.field].getTime()));
-				} else if(isRedisNumericInt(local.field)
-						&& structKeyExists(arguments.row, local.field)
-						&& (isNumeric(arguments.row[local.field]) || isBoolean(arguments.row[local.field]))
-					) {
-					local.fields.put(local.field, javaCast("int", arguments.row[local.field]));
-				} else if(structKeyExists(arguments.row, local.field) && isNumeric(arguments.row[local.field])) {
-					local.fields.put(local.field, javaCast("double", arguments.row[local.field]));
+			if(!structKeyExists(arguments.row, local.field)) {
+				arguments.row[local.field] = "";
+			}
+
+			if(isRedisDate(local.field)) {
+				if(isDate(arguments.row[local.field])) {
+					local.document.set(local.field, javaCast("long", arguments.row[local.field].getTime()));
+				}
+			} else if(isRedisNumeric(local.field)) {
+				if(isNumeric(arguments.row[local.field]) || isBoolean(arguments.row[local.field])) {
+					if(listFindNoCase("bigint,bit,integer,smallint,tinyint", getQueryable().getFieldSQLType(local.field))) {
+						local.document.set(local.field, javaCast("long", arguments.row[local.field]));
+					} else {
+						local.document.set(local.field, javaCast("double", arguments.row[local.field]));
+					}
 				}
 			} else {
-				if(structKeyExists(arguments.row, local.field) && len(arguments.row[local.field]) > 0) {
-					local.fields.put(local.field, javaCast("string", arguments.row[local.field]));
-					if(getQueryable().fieldIsFilterable(local.field)) {
-						// for filterable fields, store normalized value, escape dashes for guids/uuids
-						local.fields.put("_NFD_" & local.field, javaCast("string", stripAccents(arguments.row[local.field]).replace("-", "\-", "all")));
-					}
+				local.document.set(local.field, javaCast("string", arguments.row[local.field]));
+
+				if(getQueryable().fieldIsFilterable(local.field)) {
+					local.document.set("_NFD_" & local.field, javaCast("string", normalize(arguments.row[local.field])));
 				}
 			}
 		}
 
-		return createObject("java", "io.redisearch.Document").init(
-			getRowKey(argumentCollection = arguments.row),
-			local.fields,
-			javaCast("double", 1)
-		);
+		return local.document;
 	}
 
 }
