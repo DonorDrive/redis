@@ -16,6 +16,10 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			local.keys = local.connection.keys(getName() & ":*").toArray(javaCast("String[]", []));
 
 			local.connection.del(local.keys);
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
+		} catch(redis.clients.jedis.exceptions.JedisDataException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
@@ -30,6 +34,8 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			local.connection = variables.connectionPool.getConnection();
 
 			return local.connection.exists(getKey(arguments.key));
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
@@ -72,6 +78,8 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			if(structKeyExists(local, "item")) {
 				return variables.deserialize(local.item);
 			}
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
@@ -82,13 +90,13 @@ component accessors = "true" implements = "lib.util.IContainer" {
 	}
 
 	private string function getKey(required string key) {
-		arguments.key = lCase(arguments.key);
+		arguments.key = arguments.key;
 
-		if(left(arguments.key, len( getName() & ":" )) != ( getName() & ":" )) {
+		if(left(arguments.key, len(getName() & ":")) != ( getName() & ":" )) {
 			arguments.key = getName() & ":" & arguments.key;
 		}
 
-		return arguments.key;
+		return lCase(arguments.key);
 	}
 
 	string function getName() {
@@ -110,8 +118,9 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			);
 
 			return (local.scanResult.getResult().size() == 0);
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
-			rethrow;
 			// nothing rn
 		} finally {
 			if(structKeyExists(local, "connection")) {
@@ -140,6 +149,8 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			arraySort(local.ret, "textnocase");
 
 			return arrayToList(local.ret);
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
@@ -164,6 +175,10 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			} else {
 				local.connection.set(getKey(arguments.key), arguments.value);
 			}
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
+		} catch(redis.clients.jedis.exceptions.JedisDataException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
@@ -196,6 +211,10 @@ component accessors = "true" implements = "lib.util.IContainer" {
 					local.connection.set(getKey(local.key), variables.serialize(arguments.values[local.key]));
 				}
 			}
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
+		} catch(redis.clients.jedis.exceptions.JedisDataException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
@@ -210,6 +229,10 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			local.connection = variables.connectionPool.getConnection();
 
 			local.connection.del(getKey(arguments.key));
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
+		} catch(redis.clients.jedis.exceptions.JedisDataException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
@@ -248,6 +271,8 @@ component accessors = "true" implements = "lib.util.IContainer" {
 			for(local.key in local.keys) {
 				local.return[listRest(local.key, ":")] = variables.deserialize(local.connection.get(local.key));
 			}
+		} catch(redis.clients.jedis.exceptions.JedisConnectionException e) {
+			// nothing rn
 		} catch(redis.clients.jedis.exceptions.JedisExhaustedPoolException e) {
 			// nothing rn
 		} finally {
