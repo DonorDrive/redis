@@ -13,8 +13,8 @@ component extends = "mxunit.framework.TestCase" {
 			variables.cache = new lib.redis.QueryableCache(connectionPool = variables.connectionPool, name = "mxunit:indexed");
 
 			variables.query = queryNew(
-				"id, createdTimestamp, createdDate, createdTime, foo, bar, letter",
-				"integer, timestamp, date, time, varchar, bit, varchar"
+				"id, createdTimestamp, createdDate, createdTime, foo, bar, letter, floatie",
+				"integer, timestamp, date, time, varchar, bit, varchar, double"
 			);
 
 			queryAddRow(
@@ -27,7 +27,8 @@ component extends = "mxunit.framework.TestCase" {
 						"createdTimestamp": parseDateTime("2019-12-12T00:00:00.123Z"),
 						"createdDate": createDate(2019, 12, 12),
 						"createdTime": createTime(0, 0, 0),
-						"letter": "A"
+						"letter": "A",
+						"floatie": 10000000.00
 					},
 					{
 						"id": 5002,
@@ -36,7 +37,8 @@ component extends = "mxunit.framework.TestCase" {
 						"createdTimestamp": parseDateTime("2019-12-25T00:00:00.001Z"),
 						"createdDate": createDate(2019, 12, 25),
 						"createdTime": createTime(0, 0, 0),
-						"letter": "B"
+						"letter": "B",
+						"floatie": 1.00
 					},
 					{
 						"id": 5003,
@@ -45,7 +47,8 @@ component extends = "mxunit.framework.TestCase" {
 						"createdTimestamp": parseDateTime("2019-12-31T00:00:00.000Z"),
 						"createdDate": createDate(2019, 12, 31),
 						"createdTime": createTime(0, 0, 0),
-						"letter": "C"
+						"letter": "C",
+						"floatie": -1.300001
 					}
 				]
 			);
@@ -57,11 +60,12 @@ component extends = "mxunit.framework.TestCase" {
 					{
 						"id": 5000 + local.i,
 						"bar": (!randRange(1, 3) % 2 ? local.i % 2 : javaCast("null", "")),
-						"foo": (local.i == 500 ? "Šťŕĭńġ" : local.i == 501 ? "the rain in spain" : createUUID()),
+						"foo": (local.i == 500 ? "Šťŕĭńġ" : local.i == 501 ? "the rain in spain" : local.i == 502 ? "6k" : createUUID()),
 						"createdTimestamp": (!randRange(1, 3) % 2 ? dateAdd("s", -(local.i), variables.now) : javaCast("null", "")),
 						"createdDate": (!randRange(1, 3) % 2 ? variables.now : javaCast("null", "")),
 						"createdTime": (!randRange(1, 3) % 2 ? variables.now : javaCast("null", "")),
-						"letter": chr(64 + randRange(1, 25) + (local.i % 2 ? 32 : 0))
+						"letter": chr(64 + randRange(1, 26) + (local.i % 2 ? 32 : 0)),
+						"floatie": 0.01
 					}
 				);
 			}
@@ -76,8 +80,6 @@ component extends = "mxunit.framework.TestCase" {
 
 	function test_0_createIndex() {
 //		debug(variables.exception); return;
-		// indexes are prefixed w/ idx:
-		local.queryableCache = new lib.redis.Cache(variables.connectionPool, "idx");
 
 		try{
 			// create the index
@@ -86,7 +88,9 @@ component extends = "mxunit.framework.TestCase" {
 			// index exists already, do nothing
 		}
 
-		assertTrue(local.queryableCache.containsKey("mxunit:indexed"));
+		local.info = variables.cache.getInfo();
+//		debug(local.info);
+		assertEquals("mxunit:indexed", local.info["index_name"]);
 	}
 
 	function test_0_seedFromQueryable() {
@@ -137,6 +141,24 @@ component extends = "mxunit.framework.TestCase" {
 		assertEquals(0, dateCompare(local.compareDate, local.compare.createdTimestamp));
 	}
 
+	function test_putRow_getRow_DDMAINT_26680() {
+		local.queryRow = queryGetRow(variables.query, 1);
+		local.queryRow.foo = "";
+		variables.cache.putRow(local.queryRow);
+		local.compare = variables.cache.getRow(argumentCollection = local.queryRow);
+
+		assertEquals("", local.compare.foo);
+	}
+
+	function test_putRow_getRow_DDMAINT_27043() {
+		local.queryRow = queryGetRow(variables.query, 1);
+		local.queryRow.createdTimestamp = "";
+		variables.cache.putRow(local.queryRow);
+		local.compare = variables.cache.getRow(argumentCollection = local.queryRow);
+
+		assertEquals("", local.compare.createdTimestamp);
+	}
+
 	function test_removeRow() {
 		local.queryRow = queryGetRow(variables.query, 1);
 		local.queryRow.foo = createUUID();
@@ -147,7 +169,7 @@ component extends = "mxunit.framework.TestCase" {
 		assertFalse(variables.cache.containsRow(id = local.queryRow.id));
 	}
 
-	function test_seedFromQueryable_overwrite() {
+	function test_seedFromQueryable_overwrite_where() {
 		variables.cache.seedFromQueryable();
 
 		local.row = queryGetRow(variables.query, 2);
@@ -157,7 +179,7 @@ component extends = "mxunit.framework.TestCase" {
 
 //		debug(local.row);
 
-		variables.cache.seedFromQueryable(overwrite = true);
+		variables.cache.seedFromQueryable(overwrite = true, where = "id = #local.row.id#");
 
 		local.overwriteElement = variables.cache.getRow(id = local.row.id);
 
@@ -228,7 +250,7 @@ component extends = "mxunit.framework.TestCase" {
 	}
 
 	function test_select_where_compound_limit() {
-		local.result = variables.cache.select().where("id < 5100 AND createdTimestamp >= '#dateTimeFormat(dateAdd("d", -1, variables.now), "yyyy-mm-dd HH:nn:ss.l")#'").execute(limit = 10);
+		local.result = variables.cache.select().where("letter IN (A,B,C) AND createdTimestamp >= '#dateTimeFormat(dateAdd("d", -1, variables.now), "yyyy-mm-dd HH:nn:ss.l")#'").execute(limit = 10);
 
 //		debug(local.result);
 		assertEquals(10, local.result.recordCount);
@@ -238,13 +260,6 @@ component extends = "mxunit.framework.TestCase" {
 		local.result = variables.cache.select().where("createdTimestamp < '#dateTimeFormat(now(), 'yyyy-mm-dd HH:nn:ss.l')#' AND bar = 1").execute();
 
 		debug(local.result);
-	}
-
-	function test_select_where_DD_13660() {
-		local.result = variables.cache.select("letter, id").where("id > 5990.00").execute();
-
-		debug(local.result);
-		assertEquals(10, local.result.recordCount)
 	}
 
 	function test_select_where_DD_13763() {
@@ -297,6 +312,42 @@ component extends = "mxunit.framework.TestCase" {
 		debug(local.result);
 	}
 
+
+	function test_select_where_DDMAINT_27088_KEEP_FIELD_FLAGS() {
+		local.where = "letter = 'Šťŕĭńġ'";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(0, local.result.recordCount);
+
+		debug(local.where);
+		debug(local.result);
+	}
+
+	function test_select_where_DDMAINT_27088_KEEP_FIELD_FLAGS_2() {
+		local.where = "foo IN (6k)";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(1, local.result.recordCount);
+
+		debug(local.where);
+		debug(local.result);
+	}
+
+	function test_select_where_DDMAINT_27088_USE_TERM_OFFSETS() {
+		local.where = "foo = 'the rain in spain'";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(1, local.result.recordCount);
+
+		debug(local.where);
+		debug(local.result);
+
+		local.where = "foo = 'the spain in rain'";
+		local.result = variables.cache.select().where(local.where).execute();
+
+		assertEquals(0, local.result.recordCount);
+	}
+
 	function test_select_where_in() {
 		local.result = variables.cache.select("id, foo").where("foo IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#') OR id IN (5005, 5010, 5015)").execute();
 
@@ -320,25 +371,26 @@ component extends = "mxunit.framework.TestCase" {
 
 	function test_select_where_not_in() {
 		// numeric filtering
-		local.result = variables.cache.select("id, foo").where("id NOT IN (5005, 5010, 5015) AND id < 5015").execute();
+		local.result = variables.cache.select("id, foo").where("id NOT IN (5005, 5010, 5012)").orderBy("id ASC").execute(limit = 10);
 
 //		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("5001,5002,5003,5004,5006,5007,5008,5009,5011,5012,5013,5014", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5001,5002,5003,5004,5006,5007,5008,5009,5011,5013", listSort(valueList(local.result.id), "numeric"));
 
 		// string filtering
-		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#') AND id < 5015").execute();
+		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#')").orderBy("id ASC").execute(limit = 10);
 
 		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("5004,5005,5006,5007,5008,5009,5010,5011,5012,5013,5014", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5004,5005,5006,5007,5008,5009,5010,5011,5012,5013", listSort(valueList(local.result.id), "numeric"));
 
 		// test negation of a single record
-		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#'").execute();
+		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#'").orderBy("id ASC").execute(limit = 10);
 
 //		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals(999, local.result.recordCount);
+		assertEquals("5002,5003,5004,5005,5006,5007,5008,5009,5010,5011", listSort(valueList(local.result.id), "numeric"));
+		assertEquals(10, local.result.recordCount);
 	}
 
 	function test_select_where_orderBy_limit() {
@@ -349,15 +401,16 @@ component extends = "mxunit.framework.TestCase" {
 		assertEquals(10, local.result.recordCount);
 	}
 
-	function test_toRedisearchDocument_fromRedisearchDocument() {
+	function test_toRediSearchDocument_fromRediSearchDocument() {
 		local.row = queryGetRow(variables.query, 1);
 
-		local.document = variables.cache.toRedisearchDocument(local.row);
+		local.document = variables.cache.toRediSearchDocument(local.row);
 
 		assertEquals(local.row.letter, local.document.getString("letter"));
 
-		local.rowFromDocument = variables.cache.fromRedisearchDocument(local.document);
+		local.rowFromDocument = variables.cache.fromRediSearchDocument(local.document);
 
+//		debug(local.row);
 //		debug(local.rowFromDocument);
 		assertEquals(local.row, local.rowFromDocument);
 	}
