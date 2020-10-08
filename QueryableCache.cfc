@@ -38,7 +38,8 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 			}
 		}
 
-		local.indexOptions = createObject("java", "io.redisearch.client.Client$IndexOptions").init(0);
+		local.indexOptions = createObject("java", "io.redisearch.client.Client$IndexOptions");
+		local.indexOptions.init(local.indexOptions.KEEP_FIELD_FLAGS + local.indexOptions.USE_TERM_OFFSETS);
 
 		if(len(variables.stopWords) == 0) {
 			local.indexOptions.setNoStopwords();
@@ -47,6 +48,15 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 			variables.stopWords = variables.DEFAULT_STOP_WORDS;
 		} else {
 			local.indexOptions.setStopwords(listToArray(variables.stopWords, " "));
+		}
+
+		try {
+			local.indexDefinition = createObject("java", "io.redisearch.client.IndexDefinition")
+				.setPrefixes([ getName() ]);
+
+			local.indexOptions.setDefinition(local.indexDefinition);
+		} catch(Object e) {
+			// IndexDefinition isn't included in the version of JRediSearch being used
 		}
 
 		getClient().createIndex(
@@ -141,11 +151,11 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 
 					switch(local.criteria[local.i].operator) {
 						case "LIKE":
-							// strip out stop words and format the value
+							// fuzzy operate our normalized values
 							local.value = listReduce(
 								local.value,
 								function(result, item) {
-									if(!listFindNoCase(variables.stopWords, arguments.item, " ") && len(arguments.item) >= getMinPrefixLength()) {
+									if(len(arguments.item) >= getMinPrefixLength()) {
 										arguments.result = listAppend(arguments.result, clause & arguments.item & "*", " ");
 									}
 
@@ -167,20 +177,21 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 							break;
 						case "IN":
 						case "NOT IN":
-							local.clause = listReduce(
-								local.value,
-								function(result, item) {
-									if(find(" ", arguments.item)) {
-										arguments.item = '"' & arguments.item & '"';
-									}
+							local.clause = local.clause
+								& "("
+								& listReduce(
+									local.value,
+									function(result, item) {
+										if(find(" ", arguments.item)) {
+											arguments.item = '"' & arguments.item & '"';
+										}
 
-									return listAppend(arguments.result, arguments.item, "|");
-								},
-								"",
-								chr(31)
-							);
-
-							local.clause = "(" & local.clause & ")";
+										return listAppend(arguments.result, arguments.item, "|");
+									},
+									"",
+									chr(31)
+								)
+								& ")";
 
 							if(local.criteria[local.i].operator == "NOT IN") {
 								local.clause = "(-" & local.clause & ")";
@@ -196,7 +207,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 				}
 
 				// replace our placeholders w/ the cache-friendly values
-				local.queryString = replace(local.queryString, local.criteria[local.i].statement, local.clause, "one");
+				local.queryString = replace(local.queryString, local.criteria[local.i].statement, "(" & local.clause & ")", "one");
 			}
 		}
 
@@ -363,12 +374,19 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 			arguments.fieldFilter,
 			function(result, item) {
 				if(document.hasProperty(arguments.item)) {
-					local.value = document.getString(arguments.item);
+					local.value = document.get(arguments.item);
+					if(!structKeyExists(local, "value")) {
+						local.value = "";
+					}
 
 					if(isRedisDate(arguments.item) && isNumeric(val(local.value))) {
 						arguments.result[arguments.item] = createObject("java", "java.util.Date").init(javaCast("long", val(local.value)));
 					} else if(isRedisNumeric(arguments.item) && isNumeric(val(local.value))) {
-						arguments.result[arguments.item] = val(local.value);
+						if(listFindNoCase("bigint,bit,integer,smallint,tinyint", getQueryable().getFieldSQLType(arguments.item))) {
+							arguments.result[arguments.item] = val(local.value);
+						} else {
+							arguments.result[arguments.item] = javaCast("double", local.value);
+						}
 					} else if(len(local.value) > 0) {
 						arguments.result[arguments.item] = local.value;
 					}
@@ -388,6 +406,10 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 
 	private any function getClient() {
 		return createObject("java", "io.redisearch.client.Client").init(variables.name, variables.connectionPool.getJedisPool());
+	}
+
+	struct function getInfo() {
+		return getClient().getInfo();
 	}
 
 	any function getRow() {
@@ -446,15 +468,29 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 
 		// https://oss.redislabs.com/redisearch/Escaping.html
 		arguments.input = listReduce(
-			arguments.input,
-			function(result, item) {
-				return listAppend(arguments.result, arguments.item.REReplace("\W+", " ", "all").trim(), chr(31));
+			variables.normalizer.normalize(javaCast("string", arguments.input), variables.normalizerForm).replaceAll("\p{InCombiningDiacriticalMarks}+", ""),
+			function(outerResult, outerItem) {
+				arguments.outerItem = listReduce(
+					trim(REReplace(arguments.outerItem, "\W+", " ", "all")),
+					function(innerResult, innerItem) {
+						// these values have all been lCase'd at this point
+						if(!listFind(variables.stopWords, arguments.innerItem, " ")) {
+							arguments.innerResult = listAppend(arguments.innerResult, arguments.innerItem, " ");
+						}
+
+						return arguments.innerResult;
+					},
+					"",
+					" "
+				);
+
+				return listAppend(arguments.outerResult, arguments.outerItem, chr(31));
 			},
 			"",
 			chr(31)
 		);
 
-		return variables.normalizer.normalize(javaCast("string", arguments.input), variables.normalizerForm).replaceAll("\p{InCombiningDiacriticalMarks}+", "");
+		return trim(arguments.input);
 	}
 
 	void function putRow(required struct row) {
@@ -462,7 +498,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 			toRediSearchDocument(arguments.row),
 			createObject("java", "io.redisearch.client.AddOptions")
 				.setLanguage(getLanguage())
-				.setReplacementPolicy(createObject("java", "io.redisearch.client.AddOptions$ReplacementPolicy").PARTIAL)
+				.setReplacementPolicy(createObject("java", "io.redisearch.client.AddOptions$ReplacementPolicy").FULL)
 		);
 	}
 
@@ -470,14 +506,14 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		getClient().deleteDocument(javaCast("string", getRowKey(argumentCollection = arguments)), true);
 	}
 
-	void function seedFromQueryable(boolean overwrite = false) {
+	void function seedFromQueryable(boolean overwrite = false, string where = "") {
 		local.documents = [];
 		local.replacementPolicy = createObject("java", "io.redisearch.client.AddOptions$ReplacementPolicy");
 		local.addOptions = createObject("java", "io.redisearch.client.AddOptions")
 			.setLanguage(getLanguage())
 			.setReplacementPolicy(arguments.overwrite ? local.replacementPolicy.FULL : local.replacementPolicy.NONE);
 
-		for(local.row in getQueryable().select().execute()) {
+		for(local.row in getQueryable().select().where(arguments.where).execute()) {
 			arrayAppend(local.documents, toRediSearchDocument(local.row));
 
 			if(arrayLen(local.documents) == getImportBatchSize()) {
