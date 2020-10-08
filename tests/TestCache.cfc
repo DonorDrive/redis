@@ -57,10 +57,11 @@ component extends = "lib.util.tests.ContainerTestCase" {
 			assertEquals(queryGetRow(local.value, local.i).bar, queryGetRow(local.result, local.i).bar);
 		}
 
-		local.value = getInstance();
+		local.value = createObject("java", "java.util.HashMap");
 		try {
 			variables.container.put("MxUnitTest_serialize_deserialize_object", local.value);
-		} catch(dd.core.InvalidDataTypeException e) {
+			fail("exception not thrown");
+		} catch(lib.redis.InvalidDataTypeException e) {
 			// this is the exception we want
 		}
 	}

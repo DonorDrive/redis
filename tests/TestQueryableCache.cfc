@@ -61,7 +61,7 @@ component extends = "mxunit.framework.TestCase" {
 						"createdTimestamp": (!randRange(1, 3) % 2 ? dateAdd("s", -(local.i), variables.now) : javaCast("null", "")),
 						"createdDate": (!randRange(1, 3) % 2 ? variables.now : javaCast("null", "")),
 						"createdTime": (!randRange(1, 3) % 2 ? variables.now : javaCast("null", "")),
-						"letter": chr(64 + randRange(1, 25) + (local.i % 2 ? 32 : 0))
+						"letter": chr(64 + randRange(1, 26) + (local.i % 2 ? 32 : 0))
 					}
 				);
 			}
@@ -135,6 +135,15 @@ component extends = "mxunit.framework.TestCase" {
 		local.compare = variables.cache.getRow(argumentCollection = local.queryRow);
 
 		assertEquals(0, dateCompare(local.compareDate, local.compare.createdTimestamp));
+	}
+
+	function test_putRow_getRow_DDMAINT_26680() {
+		local.queryRow = queryGetRow(variables.query, 1);
+		local.queryRow.foo = "";
+		variables.cache.putRow(local.queryRow);
+		local.compare = variables.cache.getRow(argumentCollection = local.queryRow);
+
+		assertEquals("", local.compare.foo);
 	}
 
 	function test_removeRow() {
@@ -228,7 +237,7 @@ component extends = "mxunit.framework.TestCase" {
 	}
 
 	function test_select_where_compound_limit() {
-		local.result = variables.cache.select().where("id < 5100 AND createdTimestamp >= '#dateTimeFormat(dateAdd("d", -1, variables.now), "yyyy-mm-dd HH:nn:ss.l")#'").execute(limit = 10);
+		local.result = variables.cache.select().where("letter IN (A,B,C) AND createdTimestamp >= '#dateTimeFormat(dateAdd("d", -1, variables.now), "yyyy-mm-dd HH:nn:ss.l")#'").execute(limit = 10);
 
 //		debug(local.result);
 		assertEquals(10, local.result.recordCount);
@@ -238,13 +247,6 @@ component extends = "mxunit.framework.TestCase" {
 		local.result = variables.cache.select().where("createdTimestamp < '#dateTimeFormat(now(), 'yyyy-mm-dd HH:nn:ss.l')#' AND bar = 1").execute();
 
 		debug(local.result);
-	}
-
-	function test_select_where_DD_13660() {
-		local.result = variables.cache.select("letter, id").where("id > 5990.00").execute();
-
-		debug(local.result);
-		assertEquals(10, local.result.recordCount)
 	}
 
 	function test_select_where_DD_13763() {
@@ -320,25 +322,26 @@ component extends = "mxunit.framework.TestCase" {
 
 	function test_select_where_not_in() {
 		// numeric filtering
-		local.result = variables.cache.select("id, foo").where("id NOT IN (5005, 5010, 5015) AND id < 5015").execute();
+		local.result = variables.cache.select("id, foo").where("id NOT IN (5005, 5010, 5012)").orderBy("id ASC").execute(limit = 10);
 
 //		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("5001,5002,5003,5004,5006,5007,5008,5009,5011,5012,5013,5014", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5001,5002,5003,5004,5006,5007,5008,5009,5011,5013", listSort(valueList(local.result.id), "numeric"));
 
 		// string filtering
-		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#') AND id < 5015").execute();
+		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#', '#variables.query.foo[2]#', '#variables.query.foo[3]#')").orderBy("id ASC").execute(limit = 10);
 
 		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals("5004,5005,5006,5007,5008,5009,5010,5011,5012,5013,5014", listSort(valueList(local.result.id), "numeric"));
+		assertEquals("5004,5005,5006,5007,5008,5009,5010,5011,5012,5013", listSort(valueList(local.result.id), "numeric"));
 
 		// test negation of a single record
-		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#'").execute();
+		local.result = variables.cache.select("id, foo").where("foo NOT IN ('#variables.query.foo[1]#'").orderBy("id ASC").execute(limit = 10);
 
 //		debug(local.result);
 		assertEquals("foo,id", listSort(local.result.columnList, "textnocase"));
-		assertEquals(999, local.result.recordCount);
+		assertEquals("5002,5003,5004,5005,5006,5007,5008,5009,5010,5011", listSort(valueList(local.result.id), "numeric"));
+		assertEquals(10, local.result.recordCount);
 	}
 
 	function test_select_where_orderBy_limit() {
@@ -349,15 +352,16 @@ component extends = "mxunit.framework.TestCase" {
 		assertEquals(10, local.result.recordCount);
 	}
 
-	function test_toRedisearchDocument_fromRedisearchDocument() {
+	function test_toRediSearchDocument_fromRediSearchDocument() {
 		local.row = queryGetRow(variables.query, 1);
 
-		local.document = variables.cache.toRedisearchDocument(local.row);
+		local.document = variables.cache.toRediSearchDocument(local.row);
 
 		assertEquals(local.row.letter, local.document.getString("letter"));
 
-		local.rowFromDocument = variables.cache.fromRedisearchDocument(local.document);
+		local.rowFromDocument = variables.cache.fromRediSearchDocument(local.document);
 
+//		debug(local.row);
 //		debug(local.rowFromDocument);
 		assertEquals(local.row, local.rowFromDocument);
 	}
