@@ -1,4 +1,4 @@
-component accessors = "true" extends = "lib.sql.QueryableCache" {
+component accessors = "true" extends = "lib.sql.QueryableCache" implements = "lib.sql.IWritable" {
 
 	property name = "importBatchSize" type = "numeric" default = "1000";
 	property name = "language" type = "string" default = "english";
@@ -29,7 +29,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		local.schema = createObject("java", "io.redisearch.Schema");
 
 		for(local.field in getQueryable().getFieldList()) {
-			if(getQueryable().fieldIsFilterable(local.field)) {
+			if(getQueryable().fieldIsFilterable(local.field) || local.field == getIdentifierField()) {
 				if(isRedisNumeric(local.field)) {
 					local.schema.addSortableNumericField(local.field);
 				} else {
@@ -65,8 +65,36 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		);
 	}
 
+	lib.sql.DeleteStatement function delete() {
+		return new lib.sql.DeleteStatement(this);
+	}
+
 	void function dropIndex() {
-		getClient().dropIndex();
+		getClient().dropIndex(true);
+	}
+
+	void function executeDelete(required lib.sql.DeleteStatement deleteStatement) {
+		if(len(arguments.deleteStatement.getWhere()) == 0) {
+			dropIndex(true);
+			createIndex();
+		} else {
+			do {
+				local.targetRecords = this.select(getIdentifierField()).where(arguments.deleteStatement.getWhere()).execute();
+				local.keys = [];
+
+				for(local.row in local.targetRecords) {
+					arrayAppend(local.keys, getRowKey(argumentCollection = local.row));
+				}
+
+				if(arrayLen(local.keys)) {
+					getClient().deleteDocuments(true, local.keys);
+				}
+			} while(local.targetRecords.recordCount > 0);
+		}
+	}
+
+	void function executeInsert(required lib.sql.InsertStatement insertStatement) {
+		throw(type = "lib.redis.UnsupportedOperationException", message = "Insert is not supported in this implementation");
 	}
 
 	query function executeSelect(required lib.sql.SelectStatement selectStatement, required numeric limit, required numeric offset) {
@@ -211,8 +239,6 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 			}
 		}
 
-		local.docIDs = [];
-
 		if(!structKeyExists(local, "searchException")) {
 			try {
 				local.queryString = local.queryString
@@ -220,15 +246,15 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 					.replace(" OR ", " | ", "all")
 					.trim();
 
-				// why aggregation? redisearch only supports multiple sorts via the `aggregate` command
-				local.ab = createObject("java", "io.redisearch.aggregation.AggregationBuilder")
-					.init("'" & local.queryString & "'")
-					.apply((isRedisNumeric(getIdentifierField()) ? "@" : "@_NFD_") & getIdentifierField(), "id");
+				if(arrayLen(arguments.selectStatement.getOrderCriteria()) > 1) {
+					// why aggregation? redisearch only supports multiple sorts via the `aggregate` command
+					local.ab = createObject("java", "io.redisearch.aggregation.AggregationBuilder")
+						.init("'" & local.queryString & "'")
+						.apply(variables.aggregateApply, "id");
 
-				// sort
-				local.sortedField = createObject("java", "io.redisearch.aggregation.SortedField");
+					// sort
+					local.sortedField = createObject("java", "io.redisearch.aggregation.SortedField");
 
-				if(arrayLen(arguments.selectStatement.getOrderCriteria()) > 0) {
 					local.sortFields = arrayReduce(
 						arguments.selectStatement.getOrderCriteria(),
 						function(result, item) {
@@ -252,56 +278,80 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 						},
 						[]
 					);
+
+					local.maxResults = getMaxResults();
+
+					if(arguments.limit > 0) {
+						if(arguments.offset > 0) {
+							local.maxResults = arguments.offset + arguments.limit;
+						} else {
+							local.maxResults = arguments.limit;
+						}
+					}
+
+					local.ab.sortBy(javaCast("int", local.maxResults), local.sortFields);
+
+					// pagination
+					// look familiar? - this is the same logic as above... just not good way to re-use the condition, as the syntax must be assembled in order
+					if(arguments.limit > 0) {
+						if(arguments.offset > 0) {
+							local.ab.limit(arguments.offset, arguments.limit);
+						} else {
+							local.ab.limit(arguments.limit);
+						}
+					}
+
+					// convert the command to a string for debugging purposes
+					if(structKeyExists(arguments, "debug") && arguments.debug == "query") {
+						local.byteArray = [ createObject("java", "java.lang.String").init(javaCast("string", "")).getBytes() ];
+						local.ab.serializeRedisArgs(local.byteArray);
+						local.string = arrayReduce(
+							local.byteArray,
+							function(result, item) {
+								return listAppend(arguments.result, charsetEncode(arguments.item, "UTF-8"), " ");
+							},
+							""
+						);
+
+						throw(type = "lib.redis.DebugException", message = "ft.aggregate " & getName() & " " & local.string);
+					}
+
+					local.docIDs = [];
+					local.ids = getClient().aggregate(local.ab);
+					local.resultsLength = local.ids.totalResults;
+
+					for(local.i = 0; local.i < local.ids.getResults().size(); local.i++) {
+						arrayAppend(
+							local.docIDs,
+							// GUID/UUID get their dashes stripped during indexing
+							replace(local.ids.getRow(javaCast("int", local.i)).getString("id"), " ", "", "all")
+						);
+					}
+
+					local.documents = getClient().getDocuments(local.docIDs);
 				} else {
-					local.sortFields = [ local.sortedField.asc("@id") ];
-				}
+					local.q = createObject("java", "io.redisearch.Query")
+						.init("'" & local.queryString & "'")
+						.returnFields(listToArray(arguments.selectStatement.getSelect()));
 
-				local.maxResults = getMaxResults();
-
-				if(arguments.limit > 0) {
-					if(arguments.offset > 0) {
-						local.maxResults = arguments.offset + arguments.limit;
+					if(arrayLen(arguments.selectStatement.getOrderCriteria()) == 0) {
+						local.q.setSortBy(getIdentifierField(), true);
 					} else {
-						local.maxResults = arguments.limit;
+						local.q.setSortBy(
+							listFirst(arguments.selectStatement.getOrderBy(), " "),
+							find("ASC", arguments.selectStatement.getOrderBy())
+						);
 					}
-				}
 
-				local.ab.sortBy(javaCast("int", local.maxResults), local.sortFields);
-
-				// pagination
-				// look familiar? - this is the same logic as above... just not good way to re-use the condition, as the syntax must be assembled in order
-				if(arguments.limit > 0) {
-					if(arguments.offset > 0) {
-						local.ab.limit(arguments.offset, arguments.limit);
+					if(arguments.limit > 0) {
+						local.q.limit(arguments.offset, arguments.limit);
 					} else {
-						local.ab.limit(arguments.limit);
+						local.q.limit(0, getMaxResults());
 					}
-				}
 
-				// convert the command to a string for debugging purposes
-				if(structKeyExists(arguments, "debug") && arguments.debug == "query") {
-					local.byteArray = [ createObject("java", "java.lang.String").init(javaCast("string", "")).getBytes() ];
-					local.ab.serializeRedisArgs(local.byteArray);
-					local.string = arrayReduce(
-						local.byteArray,
-						function(result, item) {
-							return listAppend(arguments.result, charsetEncode(arguments.item, "UTF-8"), " ");
-						},
-						""
-					);
-
-					throw(type = "lib.redis.DebugException", message = "ft.aggregate " & getName() & " " & local.string);
-				}
-
-				local.ids = getClient().aggregate(local.ab);
-				local.resultsLength = local.ids.totalResults;
-
-				for(local.i = 0; local.i < local.ids.getResults().size(); local.i++) {
-					arrayAppend(
-						local.docIDs,
-						// strip escape characters back out to get the ID
-						getRowKey(argumentCollection = { "#getIdentifierField()#": replace(local.ids.getRow(javaCast("int", local.i)).getString("id"), "\-", "-", "all") })
-					);
+					local.results = getClient().search(local.q);
+					local.resultsLength = local.results.totalResults;
+					local.documents = local.results.docs;
 				}
 			} catch(redis.clients.jedis.exceptions.JedisDataException e) {
 				// nada
@@ -337,9 +387,7 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 
 		local.query = queryNew(arguments.selectStatement.getSelect(), local.fieldSQLTypes);
 
-		if(arrayLen(local.docIDs) > 0) {
-			local.documents = getClient().getDocuments(local.docIDs);
-
+		if(structKeyExists(local, "documents") && local.documents.size() > 0) {
 			for(local.i = 0; local.i < local.documents.size(); local.i++) {
 				local.document = local.documents.get(local.i);
 
@@ -357,11 +405,19 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 				.setExtendedMetadata({
 					cached: !structKeyExists(local, "searchException"),
 					engine: "redis",
-					recordCount: arrayLen(local.docIDs),
+					recordCount: structKeyExists(local, "documents") ? local.documents.size() : 0,
 					totalRecordCount: (structKeyExists(local, "resultsLength") ? local.resultsLength : 0)
 				});
 
 		return local.query;
+	}
+
+	void function executeUpdate(required lib.sql.UpdateStatement updateStatement) {
+		throw(type = "lib.redis.UnsupportedOperationException", message = "Update is not supported in this implementation");
+	}
+
+	void function executeUpsert(required lib.sql.UpsertStatement upsertStatement) {
+		throw(type = "lib.redis.UnsupportedOperationException", message = "Upsert is not supported in this implementation");
 	}
 
 	struct function fromRediSearchDocument(required any document, string fieldFilter = "") {
@@ -426,6 +482,10 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 
 			return local.result;
 		}
+	}
+
+	lib.sql.InsertStatement function insert(required struct fields) {
+		throw(type = "lib.redis.UnsupportedOperationException", message = "Insert is not supported in this implementation");
 	}
 
 	boolean function isRedisDate(required string field) {
@@ -548,6 +608,25 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 		return this;
 	}
 
+	lib.sql.QueryableCache function setRowKeyMask(required string rowKeyMask) {
+		super.setRowKeyMask(argumentCollection = arguments);
+
+		local.fl = getFieldList();
+
+		// parse the rowKeyMask to determine what properties we need
+		variables.aggregateApply = arrayReduce(
+			getKeyFields(),
+			function(result, field) {
+				return listAppend(replace(arguments.result, "{#lCase(arguments.field)#}", "%s"), (isRedisNumeric(arguments.field) ? "@" : "@_NFD_") & listGetAt(fl, listFindNoCase(fl, arguments.field)));
+			},
+			"'#getRowKeyMask()#'"
+		);
+
+		variables.aggregateApply = "format(#variables.aggregateApply#)";
+
+		return this;
+	}
+
 	lib.sql.QueryableCache function setStopWords(required string stopWords) {
 		if(structKeyExists(variables, "queryable")) {
 			throw(type = "lib.redis.QueryableDefinedException", message = "an IQueryable has been furnished already");
@@ -585,13 +664,21 @@ component accessors = "true" extends = "lib.sql.QueryableCache" {
 			} else {
 				local.document.set(local.field, javaCast("string", arguments.row[local.field]));
 
-				if(getQueryable().fieldIsFilterable(local.field)) {
+				if(getQueryable().fieldIsFilterable(local.field) || local.field == getIdentifierField()) {
 					local.document.set("_NFD_" & local.field, javaCast("string", normalize(arguments.row[local.field])));
 				}
 			}
 		}
 
 		return local.document;
+	}
+
+	lib.sql.UpdateStatement function update(required struct fields) {
+		throw(type = "lib.redis.UnsupportedOperationException", message = "Update is not supported in this implementation");
+	}
+
+	lib.sql.UpsertStatement function upsert(required struct fields) {
+		throw(type = "lib.redis.UnsupportedOperationException", message = "Upsert is not supported in this implementation");
 	}
 
 }

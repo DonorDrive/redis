@@ -102,6 +102,22 @@ component extends = "mxunit.framework.TestCase" {
 		assertFalse(variables.cache.containsRow(id = "boo-boo-butt"));
 	}
 
+	function test_delete() {
+		assertTrue(variables.cache.select().where("id > 5970 AND id < 5980").execute().recordCount > 0);
+		variables.cache.delete().where("id > 5970 AND id < 5980").execute();
+		local.result = variables.cache.select().where("id > 5970 AND id < 5980").execute();
+		assertEquals(0, local.result.recordCount);
+	}
+
+	function test_delete_all() {
+		assertNotEquals(0, variables.cache.select().execute().recordCount);
+		variables.cache.delete().execute();
+		assertEquals(0, variables.cache.select().execute().recordCount);
+
+		// re-add all the things
+		variables.cache.seedFromQueryable();
+	}
+
 	function test_fieldExists() {
 		assertTrue(variables.cache.fieldExists("id"));
 		assertFalse(variables.cache.fieldExists("asdfasfasdf"));
@@ -129,6 +145,16 @@ component extends = "mxunit.framework.TestCase" {
 
 	function test_getRowKey() {
 		assertEquals("mxunit:indexed:id:5001", variables.cache.getRowKey(id = 5001));
+	}
+
+	function test_insert() {
+		try {
+			variables.cache.insert({ id: 10001, foo: "f00" }).execute();
+		} catch(lib.redis.UnsupportedOperationException e) {
+			return;
+		}
+
+		fail("exception not thrown");
 	}
 
 	function test_putRow_getRow() {
@@ -413,6 +439,26 @@ component extends = "mxunit.framework.TestCase" {
 //		debug(local.row);
 //		debug(local.rowFromDocument);
 		assertEquals(local.row, local.rowFromDocument);
+	}
+
+	function test_update() {
+		try {
+			variables.cache.update({ id: 10001, foo: "f00" }).execute();
+		} catch(lib.redis.UnsupportedOperationException e) {
+			return;
+		}
+
+		fail("exception not thrown");
+	}
+
+	function test_upsert() {
+		try {
+			variables.cache.upsert({ id: 10001, foo: "f00" }).execute();
+		} catch(lib.redis.UnsupportedOperationException e) {
+			return;
+		}
+
+		fail("exception not thrown");
 	}
 
 }
